@@ -17,7 +17,7 @@ Requires Google Chrome, Microsoft Edge, or any browser with Web Serial API suppo
 
 Particle Life is an artificial life simulation where simple attraction and repulsion rules between different types of particles give rise to complex, emergent behaviors resembling biological organisms, cell division, flocking, and fluid dynamics.
 
-This project ports, parallelizes, and re-engineers the Particle Life engine from scratch specifically for the dual-core ESP32 microcontroller, achieving **900 simultaneous particles running at 45–60 FPS (typically locked at 60 FPS)** directly on a low-cost embedded device.
+This project ports, parallelizes, and re-engineers the Particle Life engine from scratch specifically for the dual-core ESP32 microcontroller, achieving **900 simultaneous particles running in real-time** directly on a low-cost embedded device.
 
 ---
 
