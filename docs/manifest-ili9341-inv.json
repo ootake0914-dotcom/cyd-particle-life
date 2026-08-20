@@ -1,0 +1,15 @@
+{
+  "name": "CYD Particle Life (CYD1 - ILI9341 Inverted)",
+  "version": "1.0.0",
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "cyd-particle-life-ILI9341-Inverted.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

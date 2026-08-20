@@ -1,0 +1,15 @@
+{
+  "name": "CYD Particle Life (CYD2 - ST7789)",
+  "version": "1.0.0",
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "cyd-particle-life-ST7789.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

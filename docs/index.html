@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>CYD Particle Life Web Installer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="One-click Web Installer for CYD Particle Life on ESP32-2432S028R">
+    <style>
+        :root {
+            --bg-color: #0e1117;
+            --card-bg: #161b22;
+            --border-color: #30363d;
+            --text-main: #c9d1d9;
+            --text-heading: #f0f6fc;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --accent-green: #238636;
+        }
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 2rem 1rem;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            max-width: 640px;
+            width: 100%;
+            text-align: center;
+        }
+        h1 {
+            color: var(--text-heading);
+            font-size: 1.8rem;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.02em;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+        }
+        .demo-img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            margin-bottom: 1.5rem;
+        }
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.25rem 1.5rem;
+            text-align: left;
+            margin-bottom: 1.5rem;
+        }
+        .card h2 {
+            font-size: 1.15rem;
+            color: var(--text-heading);
+            margin-top: 0;
+            margin-bottom: 0.75rem;
+        }
+        .card p, .card li {
+            font-size: 0.9rem;
+            line-height: 1.6;
+            color: var(--text-main);
+        }
+        .card ul {
+            padding-left: 1.2rem;
+            margin-bottom: 0;
+        }
+        .install-section {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1rem;
+            text-align: left;
+        }
+        .install-section h3 {
+            margin-top: 0;
+            margin-bottom: 0.4rem;
+            color: var(--text-heading);
+            font-size: 1.05rem;
+        }
+        .install-section p {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin: 0 0 0.8rem 0;
+            line-height: 1.4;
+        }
+        esp-web-install-button {
+            display: block;
+        }
+        .footer {
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+        .footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+    <script type="module" src="https://unpkg.com/esp-web-tools@latest/dist/web/install-button.js?module"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>CYD Particle Life Web Installer</h1>
+        <p class="subtitle">Install the Particle Life simulation directly to your ESP32-2432S028R (CYD).</p>
+
+        <img src="demo.gif" alt="CYD Particle Life Demo" class="demo-img">
+
+        <p style="color: var(--text-main); font-size: 0.95rem; margin-bottom: 1.5rem;">
+            Connect your CYD board via USB, choose your board variant below, and click "Install".
+        </p>
+
+        <div class="install-section">
+            <h3>1. CYD2 (ST7789) [Default / Original]</h3>
+            <p>CYD2 with ST7789 display panel. Default target for the original source code.</p>
+            <esp-web-install-button manifest="./manifest-st7789.json"></esp-web-install-button>
+        </div>
+
+        <div class="install-section">
+            <h3>2. CYD1 (ILI9341)</h3>
+            <p>CYD1 with standard ILI9341 display panel.</p>
+            <esp-web-install-button manifest="./manifest-ili9341.json"></esp-web-install-button>
+        </div>
+
+        <div class="install-section">
+            <h3>3. CYD1 (ILI9341 - Inverted Colors)</h3>
+            <p>CYD1 with ILI9341 display panel where colors appear inverted (e.g., white background instead of black).</p>
+            <esp-web-install-button manifest="./manifest-ili9341-inv.json"></esp-web-install-button>
+        </div>
+
+        <div class="card" style="margin-top: 1.5rem;">
+            <h2>Touch Controls</h2>
+            <ul>
+                <li><strong>Viewport Tap:</strong> Cycle through curated rule matrices (cellular clusters, chaotic orbits, crystal lattices, and predator-prey dynamics).</li>
+                <li><strong>[H+] Button:</strong> Increment clock hour.</li>
+                <li><strong>[M+] Button:</strong> Increment clock minute.</li>
+                <li><strong>[00s] Button:</strong> Reset seconds to 00.</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>Hardware Specifications</h2>
+            <ul>
+                <li><strong>Microcontroller:</strong> ESP32-D0WDQ6 (Dual-core 240MHz)</li>
+                <li><strong>Display:</strong> 2.8" SPI TFT LCD (240x320 resolution)</li>
+                <li><strong>Touch Controller:</strong> XPT2046 Resistive Touch</li>
+                <li><strong>Performance:</strong> 900 Particles @ 30+ FPS (Core 0: Physics / Core 1: SPI DMA)</li>
+            </ul>
+        </div>
+
+        <div class="footer">
+            <p>Source Code: <a href="https://github.com/ootake0914-dotcom/cyd-particle-life" target="_blank" rel="noopener">GitHub Repository</a></p>
+            <p>Requires Google Chrome, Microsoft Edge, or a Web Serial compatible browser.<br>
+            Original Particle Life algorithm by Hunar Ahmad (<a href="https://github.com/hunar4321/particle-life" target="_blank" rel="noopener">@hunar4321</a>, MIT License).<br>
+            Graphics powered by LovyanGFX (<a href="https://github.com/lovyan03/LovyanGFX" target="_blank" rel="noopener">@lovyan03</a>, FreeBSD License).<br>
+            Touch handling by XPT2046_Touchscreen (<a href="https://github.com/PaulStoffregen/XPT2046_Touchscreen" target="_blank" rel="noopener">@PaulStoffregen</a>).<br>
+            ESP32 port and optimizations by ootake0914-dotcom (MIT License).</p>
+        </div>
+    </div>
+</body>
+</html>
