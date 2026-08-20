@@ -2,9 +2,7 @@
 
 #include <math.h>
 #include <string.h>
-#include <esp_random.h>
 #include <esp_heap_caps.h>
-#include <esp_task_wdt.h>
 #include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -41,8 +39,6 @@ XPT2046_Touchscreen ts(TOUCH_CS, TOUCH_IRQ);
 #define NUM_PARTICLES    900
 #define R                60
 #define FPB              4                       // 固定小数点（位置: Q4）
-#define RQ4              (R << FPB)
-#define R2Q8             ((R * R) << (2 * FPB))
 #define TRAIL_LEVELS     16
 #define TRAIL_MASK       (TRAIL_LEVELS - 1)
 #define LUT_SIZE         (R * R + 2)
@@ -56,12 +52,6 @@ struct Particle {
   uint8_t _pad;
 };
 
-// シミュレーション（Core 0）から描画（Core 1）へ渡す4バイトスナップショット
-union Snap {
-  uint32_t u;
-  struct { int16_t px; uint8_t py; uint8_t type; };
-};
-
 // ダブルバッファ粒子・IDポインタ
 Particle* partsCur = nullptr;
 Particle* partsNext = nullptr;
@@ -73,11 +63,7 @@ int32_t  velXq12[NUM_PARTICLES];
 int32_t  velYq12[NUM_PARTICLES];
 int32_t  forceXq12[2][NUM_PARTICLES];
 int32_t  forceYq12[2][NUM_PARTICLES];
-int16_t  ruleGq8[MAX_TYPES][MAX_TYPES];
-int16_t  ruleGq8T[MAX_TYPES][MAX_TYPES];
-int32_t  radius2Q8[MAX_TYPES];
 int32_t  dampQ12;
-uint8_t  typeColor[MAX_TYPES];
 
 // LUTテーブル
 uint8_t   invRank[LUT_SIZE];
@@ -95,14 +81,13 @@ unsigned long lastClockTick = 0;
 
 // フレームバッファ・残光バッファ
 uint16_t* frame565 = nullptr;
-uint16_t  pal565[256];
 uint8_t*  trail8 = nullptr;
 uint16_t  trail565[256];
 uint16_t  arenaBackground565;
 uint16_t  arenaBorder565;
 
-// スナップショット＆同期セマフォ
-Snap snap[2][NUM_PARTICLES];
+// スナップショット（Core 0 -> Core 1, 4バイトパック）＆同期セマフォ
+uint32_t snap[2][NUM_PARTICLES];
 SemaphoreHandle_t semEmpty, semFull;
 SemaphoreHandle_t semForceGo, semForceDone;
 
@@ -328,30 +313,11 @@ const uint16_t presetCounts[NUM_PRESETS][MAX_TYPES] = {
   { 260, 260, 130, 130,  60,  60 }, // 14: amoeba
 };
 
-const uint8_t presetRadius[NUM_PRESETS][MAX_TYPES] = {
-  { 60, 60, 60, 60, 60, 60 }, // 0: cells
-  { 36, 36, 36, 36, 36, 36 }, // 1: chains
-  { 50, 50, 50, 50, 50, 50 }, // 2: orbits
-  { 50, 50, 50, 50, 50, 50 }, // 3: crawlers
-  { 60, 60, 60, 60, 60, 60 }, // 4: microbes
-  { 50, 50, 50, 50, 50, 50 }, // 5: mitosis
-  { 55, 55, 55, 55, 55, 55 }, // 6: membranes
-  { 42, 42, 42, 42, 42, 42 }, // 7: worms
-  { 55, 55, 55, 55, 55, 55 }, // 8: vortex
-  { 50, 50, 50, 50, 50, 50 }, // 9: planets
-  { 50, 50, 50, 50, 50, 50 }, // 10: gliders
-  { 55, 55, 55, 55, 55, 55 }, // 11: swarm
-  { 60, 60, 60, 60, 60, 60 }, // 12: colonies
-  { 50, 50, 50, 50, 50, 50 }, // 13: crystals
-  { 60, 60, 60, 60, 60, 60 }, // 14: amoeba
-};
-
-const uint8_t presetTypeCount[NUM_PRESETS] = {
-  6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6
+const uint8_t presetRadius[NUM_PRESETS] = {
+  60, 36, 50, 50, 60, 50, 55, 42, 55, 50, 50, 55, 60, 50, 60
 };
 
 volatile int currentPreset = DEFAULT_PRESET;
-float viscosity = 0.64f;
 
 const char* presetNames[NUM_PRESETS] = {
   "cells", "chains", "orbits", "crawlers",
@@ -362,11 +328,10 @@ const char* presetNames[NUM_PRESETS] = {
 
 // プリセット適用
 void setPreset(int p) {
+  int16_t ruleGq8[MAX_TYPES][MAX_TYPES];
   for (int i = 0; i < MAX_TYPES; i++) {
     for (int j = 0; j < MAX_TYPES; j++) {
-      int16_t g = (int16_t)lrintf(presets[p][i][j] * 256.0f);
-      ruleGq8[i][j]  = g;
-      ruleGq8T[j][i] = g;
+      ruleGq8[i][j] = (int16_t)lrintf(presets[p][i][j] * 256.0f);
     }
   }
   if (forceScale) {
@@ -380,34 +345,29 @@ void setPreset(int p) {
       }
     }
   }
-  viscosity = presetViscosity[p];
-  dampQ12 = (int32_t)lrintf((1.0f - viscosity) * 4096.0f);
-  const int radius = presetRadius[p][0];
+  dampQ12 = (int32_t)lrintf((1.0f - presetViscosity[p]) * 4096.0f);
+  const int radius = presetRadius[p];
   currentRadiusQ4  = radius << FPB;
   currentRadius2Q8 = ((int32_t)radius * radius) << (2 * FPB);
-  for (int i = 0; i < MAX_TYPES; i++) {
-    radius2Q8[i] = ((int32_t)presetRadius[p][i] * presetRadius[p][i]) << (2 * FPB);
-  }
 }
 
 // 疑似乱数生成器（Xorshift32）
-uint32_t testRandom = 0x12345678;
+uint32_t rngState = 0x12345678;
 static inline uint32_t fixedRandom() {
-  testRandom ^= testRandom << 13;
-  testRandom ^= testRandom >> 17;
-  testRandom ^= testRandom << 5;
-  return testRandom;
+  rngState ^= rngState << 13;
+  rngState ^= rngState >> 17;
+  rngState ^= rngState << 5;
+  return rngState;
 }
 
 // 粒子初期化
 void initParticles(int preset) {
-  const int typeCount = presetTypeCount[preset];
   int type = 0;
   int nextType = presetCounts[preset][0];
-  testRandom = 0x12345678;
+  rngState = 0x12345678;
   for (int k = 0; k < NUM_PARTICLES; k++) {
     idCur[k] = (uint16_t)k;
-    while (type < typeCount - 1 && k >= nextType) {
+    while (type < MAX_TYPES - 1 && k >= nextType) {
       type++;
       nextType += presetCounts[preset][type];
     }
@@ -419,17 +379,37 @@ void initParticles(int preset) {
   }
 }
 
+// 粒子位置(Q4)からセル番号を算出（範囲外はクランプ）
+static inline IRAM_ATTR int cellIndexOfQ4(int16_t xQ4, int16_t yQ4) {
+  int cx = (xQ4 >> FPB) >> CELL_SHIFT;
+  int cy = (yQ4 >> FPB) >> CELL_SHIFT;
+  if ((unsigned)cx >= GRID_W) cx = (cx < 0) ? 0 : GRID_W - 1;
+  if ((unsigned)cy >= GRID_H) cy = (cy < 0) ? 0 : GRID_H - 1;
+  return cy * GRID_W + cx;
+}
+
+// 力計算ジョブを負荷の少ないコアへ振り分け（上限超過時はfalse）
+static inline IRAM_ATTR bool emitForceJob(int aBegin, int aEnd, int bBegin, int bEnd,
+                                          bool sameCell, uint32_t work) {
+  const int targetCore = (workUnits[0] <= workUnits[1]) ? 0 : 1;
+  if (numJobs[targetCore] >= MAX_JOBS_PER_CORE) return false;
+  ForceJob& job = jobs[targetCore][numJobs[targetCore]++];
+  job.aBegin = (uint16_t)aBegin;
+  job.aEnd   = (uint16_t)aEnd;
+  job.bBegin = (uint16_t)bBegin;
+  job.bEnd   = (uint16_t)bEnd;
+  job.sameCell = sameCell;
+  workUnits[targetCore] += work;
+  return true;
+}
+
 // 2Dセルリスト構築 ＆ 各コアの処理負荷に応じた動的ジョブ振り分け
 void IRAM_ATTR __attribute__((optimize("O3"))) buildCellList() {
   memset(cellCount, 0, sizeof(cellCount));
   const Particle* __restrict__ p = partsCur;
 
   for (int k = 0; k < NUM_PARTICLES; k++) {
-    int cx = (p[k].x >> FPB) >> CELL_SHIFT;
-    int cy = (p[k].y >> FPB) >> CELL_SHIFT;
-    if ((unsigned)cx >= GRID_W) cx = (cx < 0) ? 0 : GRID_W - 1;
-    if ((unsigned)cy >= GRID_H) cy = (cy < 0) ? 0 : GRID_H - 1;
-    cellCount[cy * GRID_W + cx]++;
+    cellCount[cellIndexOfQ4(p[k].x, p[k].y)]++;
   }
 
   cellStart[0] = 0;
@@ -442,11 +422,7 @@ void IRAM_ATTR __attribute__((optimize("O3"))) buildCellList() {
 
   const uint16_t* __restrict__ pid = idCur;
   for (int k = 0; k < NUM_PARTICLES; k++) {
-    int cx = (p[k].x >> FPB) >> CELL_SHIFT;
-    int cy = (p[k].y >> FPB) >> CELL_SHIFT;
-    if ((unsigned)cx >= GRID_W) cx = (cx < 0) ? 0 : GRID_W - 1;
-    if ((unsigned)cy >= GRID_H) cy = (cy < 0) ? 0 : GRID_H - 1;
-    int cellIdx = cy * GRID_W + cx;
+    const int cellIdx = cellIndexOfQ4(p[k].x, p[k].y);
     const int dst = cellCursor[cellIdx]++;
     partsNext[dst] = p[k];
     idNext[dst] = pid[k];
@@ -499,18 +475,10 @@ void IRAM_ATTR __attribute__((optimize("O3"))) buildCellList() {
           nextA++;
         }
 
-        int targetCore = (workUnits[0] <= workUnits[1]) ? 0 : 1;
-        if (numJobs[targetCore] >= MAX_JOBS_PER_CORE) {
+        if (!emitForceJob(curA, nextA, curA, cellEnd, true, work)) {
           forceJobOverflow = true;
           return;
         }
-        ForceJob& job = jobs[targetCore][numJobs[targetCore]++];
-        job.aBegin = curA;
-        job.aEnd   = nextA;
-        job.bBegin = curA;
-        job.bEnd   = cellEnd;
-        job.sameCell = true;
-        workUnits[targetCore] += work;
 
         curA = nextA;
       }
@@ -537,27 +505,18 @@ void IRAM_ATTR __attribute__((optimize("O3"))) buildCellList() {
         int bBegin = cellStart[cellB];
         int bEnd   = cellStart[cellB + 1];
 
-        const int maxPairsPerJob = MAX_PAIRS_PER_JOB;
-        int aChunk = maxPairsPerJob / countB;
+        int aChunk = MAX_PAIRS_PER_JOB / countB;
         if (aChunk < 1) aChunk = 1;
 
         for (int a = aBegin; a < cellEnd; a += aChunk) {
           int aSubEnd = a + aChunk;
           if (aSubEnd > cellEnd) aSubEnd = cellEnd;
-          uint32_t w = (uint32_t)(aSubEnd - a) * countB;
+          const uint32_t w = (uint32_t)(aSubEnd - a) * countB;
 
-          int targetCore = (workUnits[0] <= workUnits[1]) ? 0 : 1;
-          if (numJobs[targetCore] >= MAX_JOBS_PER_CORE) {
+          if (!emitForceJob(a, aSubEnd, bBegin, bEnd, false, w)) {
             forceJobOverflow = true;
             return;
           }
-          ForceJob& job = jobs[targetCore][numJobs[targetCore]++];
-          job.aBegin = a;
-          job.aEnd   = aSubEnd;
-          job.bBegin = bBegin;
-          job.bEnd   = bEnd;
-          job.sameCell = false;
-          workUnits[targetCore] += w;
         }
       }
     }
@@ -581,66 +540,37 @@ void IRAM_ATTR __attribute__((optimize("O3"))) computeForces(int coreId,
     const int aEnd   = job.aEnd;
     const int bBegin = job.bBegin;
     const int bEnd   = job.bEnd;
+    const bool sameCell = job.sameCell;
 
-    if (job.sameCell) {
-      const int cellEnd = bEnd;
-      for (int i = aBegin; i < aEnd; i++) {
-        const Particle pi = p[i];
-        const uint32_t (* __restrict__ scaleRow)[MAX_TYPES] = forceScale[pi.type];
-        int32_t fxI = 0, fyI = 0;
+    for (int i = aBegin; i < aEnd; i++) {
+      const Particle pi = p[i];
+      const uint32_t (* __restrict__ scaleRow)[MAX_TYPES] = forceScale[pi.type];
+      int32_t fxI = 0, fyI = 0;
+      // 同一セル内はペア重複を避け j > i から、セル間は bBegin から走査
+      const int jStart = sameCell ? (i + 1) : bBegin;
 
-        for (int j = i + 1; j < cellEnd; j++) {
-          const Particle pj = p[j];
-          const int32_t dy = pi.y - pj.y;
-          if ((uint32_t)(dy + radiusQ4 - 1) >= dyLimit) continue;
-          const int32_t dx = pi.x - pj.x;
-          if ((uint32_t)(dx + radiusQ4 - 1) >= dyLimit) continue;
+      for (int j = jStart; j < bEnd; j++) {
+        const Particle pj = p[j];
+        const int32_t dy = pi.y - pj.y;
+        if ((uint32_t)(dy + radiusQ4 - 1) >= dyLimit) continue;
+        const int32_t dx = pi.x - pj.x;
+        if ((uint32_t)(dx + radiusQ4 - 1) >= dyLimit) continue;
 
-          const int32_t d2 = dx * dx + dy * dy;
-          if (d2 < radius2Q8) {
-            const uint8_t rank = invRank[d2 >> 8];
-            const uint32_t packed = scaleRow[rank][pj.type];
-            const int32_t fij = (int16_t)packed;
-            const int32_t fji = (int16_t)(packed >> 16);
+        const int32_t d2 = dx * dx + dy * dy;
+        if (d2 < radius2Q8) {
+          const uint8_t rank = invRank[d2 >> 8];
+          const uint32_t packed = scaleRow[rank][pj.type];
+          const int32_t fij = (int16_t)packed;
+          const int32_t fji = (int16_t)(packed >> 16);
 
-            fxI += fij * dx;
-            fyI += fij * dy;
-            fxArr[j] -= fji * dx;
-            fyArr[j] -= fji * dy;
-          }
+          fxI += fij * dx;
+          fyI += fij * dy;
+          fxArr[j] -= fji * dx;
+          fyArr[j] -= fji * dy;
         }
-        fxArr[i] += fxI;
-        fyArr[i] += fyI;
       }
-    } else {
-      for (int i = aBegin; i < aEnd; i++) {
-        const Particle pi = p[i];
-        const uint32_t (* __restrict__ scaleRow)[MAX_TYPES] = forceScale[pi.type];
-        int32_t fxI = 0, fyI = 0;
-
-        for (int j = bBegin; j < bEnd; j++) {
-          const Particle pj = p[j];
-          const int32_t dy = pi.y - pj.y;
-          if ((uint32_t)(dy + radiusQ4 - 1) >= dyLimit) continue;
-          const int32_t dx = pi.x - pj.x;
-          if ((uint32_t)(dx + radiusQ4 - 1) >= dyLimit) continue;
-
-          const int32_t d2 = dx * dx + dy * dy;
-          if (d2 < radius2Q8) {
-            const uint8_t rank = invRank[d2 >> 8];
-            const uint32_t packed = scaleRow[rank][pj.type];
-            const int32_t fij = (int16_t)packed;
-            const int32_t fji = (int16_t)(packed >> 16);
-
-            fxI += fij * dx;
-            fyI += fij * dy;
-            fxArr[j] -= fji * dx;
-            fyArr[j] -= fji * dy;
-          }
-        }
-        fxArr[i] += fxI;
-        fyArr[i] += fyI;
-      }
+      fxArr[i] += fxI;
+      fyArr[i] += fyI;
     }
   }
 }
@@ -680,12 +610,12 @@ void IRAM_ATTR __attribute__((optimize("O3"))) integrate() {
 
 // 描画用スナップショットの生成（32bitパッキング）
 void IRAM_ATTR __attribute__((optimize("O3"))) snapshotParticles(int w) {
-  Snap* __restrict__ s = snap[w];
+  uint32_t* __restrict__ s = snap[w];
   const Particle* __restrict__ p = partsCur;
   for (int k = 0; k < NUM_PARTICLES; k++) {
-    s[k].u = (uint32_t)(uint16_t)(p[k].x >> FPB)
-           | ((uint32_t)(uint8_t)(p[k].y >> FPB) << 16)
-           | ((uint32_t)p[k].type << 24);
+    s[k] = (uint32_t)(uint16_t)(p[k].x >> FPB)
+         | ((uint32_t)(uint8_t)(p[k].y >> FPB) << 16)
+         | ((uint32_t)p[k].type << 24);
   }
 }
 
@@ -762,13 +692,25 @@ static inline void stampParticleGlowFast(int x, int y, uint8_t type) {
   #undef STAMP_P
 }
 
+// アリーナ外周の境界線描画
+static void drawArenaBorder(uint16_t* buf) {
+  for (int x = 0; x < WORLD_W; x++) {
+    buf[x] = arenaBorder565;
+    buf[(WORLD_H - 1) * WORLD_W + x] = arenaBorder565;
+  }
+  for (int y = 0; y < WORLD_H; y++) {
+    buf[y * WORLD_W] = arenaBorder565;
+    buf[y * WORLD_W + WORLD_W - 1] = arenaBorder565;
+  }
+}
+
 // フレームバッファ生成（残光減衰・RGB565展開）
 void __attribute__((optimize("O3"))) buildFrame(int r) {
   uint16_t* __restrict__ buf = frame565;
-  const Snap* __restrict__ s = snap[r];
+  const uint32_t* __restrict__ s = snap[r];
 
   for (int k = 0; k < NUM_PARTICLES; k++) {
-    const uint32_t u = s[k].u;
+    const uint32_t u = s[k];
     unsigned px = u & 0xFFFF, py = (u >> 16) & 0xFF;
     const uint8_t type = (uint8_t)(u >> 24);
     int cx = (int)px, cy = (int)py;
@@ -799,14 +741,7 @@ void __attribute__((optimize("O3"))) buildFrame(int r) {
     }
   }
 
-  for (int x = 0; x < WORLD_W; x++) {
-    buf[x] = arenaBorder565;
-    buf[(WORLD_H - 1) * WORLD_W + x] = arenaBorder565;
-  }
-  for (int y = 0; y < WORLD_H; y++) {
-    buf[y * WORLD_W] = arenaBorder565;
-    buf[y * WORLD_W + WORLD_W - 1] = arenaBorder565;
-  }
+  drawArenaBorder(buf);
 }
 
 // DMA送信制御
@@ -888,14 +823,14 @@ void setup() {
     while (1) delay(1000);
   }
 
-  memset(frame565, 0, frameBytes);
   memset(trail8, 0, framePixels);
 
   const uint16_t hudPanel = lcd.color565(4, 7, 18);
   lcd.fillRect(0, 0, WORLD_W, ORIGIN_Y - 1, hudPanel);
   lcd.fillRect(0, HUD_Y + 1, WORLD_W, HUD_H - 1, hudPanel);
-  lcd.drawFastHLine(0, ORIGIN_Y - 1, WORLD_W, lcd.color565(28, 32, 44));
-  lcd.drawFastHLine(0, HUD_Y,     WORLD_W, lcd.color565(28, 32, 44));
+  const uint16_t hudLine = lcd.color565(28, 32, 44);
+  lcd.drawFastHLine(0, ORIGIN_Y - 1, WORLD_W, hudLine);
+  lcd.drawFastHLine(0, HUD_Y,     WORLD_W, hudLine);
 
   initGammaLUT();
   // 6タイプ分の基色（緑 / 赤 / 黄 / シアン / マゼンタ / 青）
@@ -912,13 +847,9 @@ void setup() {
     gammaLut[255], gammaLut[255], gammaLut[255],
   };
 
-  for (int i = 0; i < 256; i++) {
-    pal565[i] = 0;
-    trail565[i] = 0;
-  }
+  memset(trail565, 0, sizeof(trail565));
   for (int t = 0; t < MAX_TYPES; t++) {
     const uint8_t colorIndex = (uint8_t)(t + 1);
-    pal565[colorIndex] = lgfx::swap565(baseR[t], baseG[t], baseB[t]);
     for (int level = 1; level < TRAIL_LEVELS; level++) {
       const uint8_t r = (uint16_t)baseR[t] * level / (TRAIL_LEVELS - 1);
       const uint8_t g = (uint16_t)baseG[t] * level / (TRAIL_LEVELS - 1);
@@ -932,14 +863,7 @@ void setup() {
   for (size_t i = 0; i < framePixels; i++) {
     frame565[i] = arenaBackground565;
   }
-  for (int x = 0; x < WORLD_W; x++) {
-    frame565[x] = arenaBorder565;
-    frame565[(WORLD_H - 1) * WORLD_W + x] = arenaBorder565;
-  }
-  for (int y = 0; y < WORLD_H; y++) {
-    frame565[y * WORLD_W] = arenaBorder565;
-    frame565[y * WORLD_W + WORLD_W - 1] = arenaBorder565;
-  }
+  drawArenaBorder(frame565);
 
   for (int old = 0; old < 256; old++) {
     uint8_t next = 0;
@@ -959,10 +883,6 @@ void setup() {
 
   clockHour = 0; clockMin = 0; clockSec = 0;
   lastClockTick = millis();
-
-  for (int t = 0; t < MAX_TYPES; t++) {
-    typeColor[t] = t + 1;
-  }
 
   initLUT();
   initParticles(currentPreset);
@@ -1040,11 +960,6 @@ void loop() {
   }
 
   // 描画周期を一定化し、Core 1 の力計算時間を確保するため TARGET_FPS で待機
-  static TickType_t frameWake;
-  static bool frameWakeInit = false;
-  if (!frameWakeInit) {
-    frameWake = xTaskGetTickCount();
-    frameWakeInit = true;
-  }
+  static TickType_t frameWake = xTaskGetTickCount();  // 初回実行時に初期化
   vTaskDelayUntil(&frameWake, pdMS_TO_TICKS(1000 / TARGET_FPS));
 }
